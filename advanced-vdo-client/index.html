@@ -568,16 +568,10 @@
         }
 
         function resolveIncomingBufferMs(msg) {
-            const measuredAudioDelayMs = getNonNegativeMessageMs(msg, ['measuredAudioDelayMs', 'audioDelayMs']);
-            const senderServerLatencyMs = getNonNegativeMessageMs(msg, ['senderServerLatencyMs', 'remoteServerLatencyMs']);
-            const receiverServerLatencyMs = getNonNegativeMessageMs(msg, ['receiverServerLatencyMs', 'localServerLatencyMs']);
-            if (isFinite(measuredAudioDelayMs) && (isFinite(senderServerLatencyMs) || isFinite(receiverServerLatencyMs))) {
-                const sender = isFinite(senderServerLatencyMs) ? senderServerLatencyMs : 0;
-                const receiver = isFinite(receiverServerLatencyMs) ? receiverServerLatencyMs : 0;
-                return Math.max(0, Math.round(measuredAudioDelayMs - sender - receiver));
-            }
-
             const receiverBufferMs = getNonNegativeMessageMs(msg, ['receiverBufferMs']);
+            if (boolProp(msg, 'receiverBufferFinal') === true && isFinite(receiverBufferMs)) {
+                return Math.max(0, Math.round(receiverBufferMs));
+            }
             if (isFinite(receiverBufferMs)) {
                 return Math.max(0, Math.round(receiverBufferMs));
             }
@@ -585,6 +579,15 @@
             const bufferTotalMs = getNonNegativeMessageMs(msg, ['bufferTotalMs']);
             if (isFinite(bufferTotalMs)) {
                 return Math.max(0, Math.round(bufferTotalMs));
+            }
+
+            const measuredAudioDelayMs = getNonNegativeMessageMs(msg, ['measuredAudioDelayMs', 'audioDelayMs']);
+            const senderServerLatencyMs = getNonNegativeMessageMs(msg, ['senderServerLatencyMs', 'remoteServerLatencyMs']);
+            const receiverServerLatencyMs = getNonNegativeMessageMs(msg, ['receiverServerLatencyMs', 'localServerLatencyMs']);
+            if (isFinite(measuredAudioDelayMs) && (isFinite(senderServerLatencyMs) || isFinite(receiverServerLatencyMs))) {
+                const sender = isFinite(senderServerLatencyMs) ? senderServerLatencyMs : 0;
+                const receiver = isFinite(receiverServerLatencyMs) ? receiverServerLatencyMs : 0;
+                return Math.max(0, Math.round(measuredAudioDelayMs - sender - receiver));
             }
 
             if (isFinite(measuredAudioDelayMs)) {
@@ -786,13 +789,16 @@
 
         function applyActiveRosterMessage(msg) {
             const revision = String(msg.revision ?? msg.videoClockMs ?? '');
+            if (!Array.isArray(msg.users) || !msg.users.length) {
+                return;
+            }
             if (revision && lastRosterRevision === revision) {
                 return;
             }
             if (revision) {
                 lastRosterRevision = revision;
             }
-            pruneUsersMissingFromPayload(Array.isArray(msg.users) ? msg.users : []);
+            pruneUsersMissingFromPayload(msg.users);
         }
 
         function loadUsersFromStorage() {

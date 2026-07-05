@@ -195,15 +195,31 @@
             return normalizeCameraFx(query.get('effects') || query.get('effect') || 'off');
         }
 
+        function queryInteger(names, fallback, min, max) {
+            for (let i = 0; i < names.length; i++) {
+                const raw = query.get(names[i]);
+                if (raw === null || raw === '') {
+                    continue;
+                }
+                const parsed = parseInt(raw, 10);
+                if (!isFinite(parsed)) {
+                    continue;
+                }
+                return Math.max(min, Math.min(max, parsed));
+            }
+            return fallback;
+        }
+
         const appState = {
             room: resolvedRoom,
             label: query.get('label') || 'NINJAM',
+            vdoSyncUserKey: query.get('vdoSyncUserKey') || '',
             store: query.get('store') || '',
             bg: query.get('bg') || '',
             intervalSource: query.get('intervalSource') || '',
             intervalPollMs: parseInt(query.get('intervalPollMs') || '', 10) || 500,
             requestedBufferMs: Math.max(minimumBufferMs, parseInt(query.get('buffer') || '', 10) || minimumBufferMs),
-            chunkedMs: parseInt(query.get('chunked') || '', 10) || 120,
+            chunkedMs: queryInteger(['chunkbitrate', 'chunkvideobitrate', 'webcodecsbitrate', 'chunked', 'bitrate'], 900, 60, 100000),
             ninjamServer: ninjamServer,
             initialBufferMode: normalizeBufferMode(query.get('bufferMode')),
             cameraCodec: initialVdoCodec(),
@@ -282,6 +298,10 @@
             latencyUpdatedAtByUser: {},
             chunkEventsByStreamId: {},
             chunkStatsByUser: {},
+            mappingSourceByUser: {},
+            mappingDiagnosticsByUser: {},
+            lastResolveSource: '',
+            lastResolveDiagnostic: '',
             lastRosterRevision: '',
             rosterTimerId: 0
         };
@@ -418,12 +438,15 @@
         }
 
         function resolveUserKeyFromLabel(label) {
+            vdoState.lastResolveSource = '';
+            vdoState.lastResolveDiagnostic = '';
             const normalizedLabel = normalizeUserId(label);
             if (!normalizedLabel) {
                 return '';
             }
             const trackedUsers = getTrackedUserKeys();
             if (trackedUsers.indexOf(normalizedLabel) >= 0) {
+                vdoState.lastResolveSource = 'exact-label';
                 return normalizedLabel;
             }
 
@@ -432,10 +455,14 @@
                 const candidate = trackedUsers[i];
                 if (normalizedLabel.indexOf(candidate) >= 0 || candidate.indexOf(normalizedLabel) >= 0) {
                     if (matchedUser && matchedUser !== candidate) {
+                        vdoState.lastResolveDiagnostic = 'ambiguous label ' + normalizedLabel;
                         return '';
                     }
                     matchedUser = candidate;
                 }
+            }
+            if (matchedUser) {
+                vdoState.lastResolveSource = 'fuzzy-label';
             }
             return matchedUser;
         }
@@ -478,10 +505,21 @@
                 return false;
             }
             const targetId = String(explicitTargetId || cleanStreamId).trim();
+            const mappingSource = vdoState.lastResolveSource || 'label';
+            const existingStreamId = vdoState.streamIdByUser[userKey];
+            if (existingStreamId && existingStreamId !== cleanStreamId) {
+                const existingSource = vdoState.mappingSourceByUser[userKey] || '';
+                if (!(mappingSource === 'exact-label' && existingSource !== 'exact-label')) {
+                    vdoState.mappingDiagnosticsByUser[userKey] = 'duplicate stream ' + existingStreamId + ' / ' + cleanStreamId;
+                    return true;
+                }
+            }
             const changed = vdoState.streamIdByUser[userKey] !== cleanStreamId
                 || vdoState.targetIdByUser[userKey] !== targetId;
             vdoState.streamIdByUser[userKey] = cleanStreamId;
             vdoState.targetIdByUser[userKey] = targetId;
+            vdoState.mappingSourceByUser[userKey] = mappingSource;
+            delete vdoState.mappingDiagnosticsByUser[userKey];
             if (changed) {
                 resetBufferApplicationState(userKey);
             }
@@ -502,6 +540,8 @@
                     delete vdoState.streamIdByUser[userKey];
                     delete vdoState.targetIdByUser[userKey];
                     delete vdoState.chunkStatsByUser[userKey];
+                    delete vdoState.mappingSourceByUser[userKey];
+                    delete vdoState.mappingDiagnosticsByUser[userKey];
                     resetBufferApplicationState(userKey);
                     changed = true;
                 }
@@ -640,16 +680,10 @@
         }
 
         function resolveIncomingBufferMs(data) {
-            const measuredAudioDelayMs = getNonNegativeMessageMs(data, ['measuredAudioDelayMs', 'audioDelayMs']);
-            const senderServerLatencyMs = getNonNegativeMessageMs(data, ['senderServerLatencyMs', 'remoteServerLatencyMs']);
-            const receiverServerLatencyMs = getNonNegativeMessageMs(data, ['receiverServerLatencyMs', 'localServerLatencyMs']);
-            if (isFinite(measuredAudioDelayMs) && (isFinite(senderServerLatencyMs) || isFinite(receiverServerLatencyMs))) {
-                const sender = isFinite(senderServerLatencyMs) ? senderServerLatencyMs : 0;
-                const receiver = isFinite(receiverServerLatencyMs) ? receiverServerLatencyMs : 0;
-                return Math.max(minimumBufferMs, Math.round(measuredAudioDelayMs - sender - receiver));
-            }
-
             const receiverBufferMs = getNonNegativeMessageMs(data, ['receiverBufferMs']);
+            if (boolProp(data, 'receiverBufferFinal') === true && isFinite(receiverBufferMs)) {
+                return Math.max(minimumBufferMs, Math.round(receiverBufferMs));
+            }
             if (isFinite(receiverBufferMs)) {
                 return Math.max(minimumBufferMs, Math.round(receiverBufferMs));
             }
@@ -657,6 +691,15 @@
             const bufferTotalMs = getNonNegativeMessageMs(data, ['bufferTotalMs']);
             if (isFinite(bufferTotalMs)) {
                 return Math.max(minimumBufferMs, Math.round(bufferTotalMs));
+            }
+
+            const measuredAudioDelayMs = getNonNegativeMessageMs(data, ['measuredAudioDelayMs', 'audioDelayMs']);
+            const senderServerLatencyMs = getNonNegativeMessageMs(data, ['senderServerLatencyMs', 'remoteServerLatencyMs']);
+            const receiverServerLatencyMs = getNonNegativeMessageMs(data, ['receiverServerLatencyMs', 'localServerLatencyMs']);
+            if (isFinite(measuredAudioDelayMs) && (isFinite(senderServerLatencyMs) || isFinite(receiverServerLatencyMs))) {
+                const sender = isFinite(senderServerLatencyMs) ? senderServerLatencyMs : 0;
+                const receiver = isFinite(receiverServerLatencyMs) ? receiverServerLatencyMs : 0;
+                return Math.max(minimumBufferMs, Math.round(measuredAudioDelayMs - sender - receiver));
             }
 
             if (isFinite(measuredAudioDelayMs)) {
@@ -895,17 +938,24 @@
                     continue;
                 }
                 const targetMs = getNumericProperty(chunkStats, ['buffer_buffer']);
+                const deltaMs = getNumericProperty(chunkStats, ['buffer_delta']);
                 const levelMs = getNumericProperty(chunkStats, ['buffer_level']);
                 const nextStats = {
                     targetMs: isFinite(targetMs) ? targetMs : NaN,
+                    deltaMs: isFinite(deltaMs) ? deltaMs : NaN,
                     levelMs: isFinite(levelMs) ? levelMs : NaN,
+                    scheduler: typeof chunkStats.scheduler === 'string' ? chunkStats.scheduler : '',
+                    audioContextState: typeof chunkStats.audio_context_state === 'string' ? chunkStats.audio_context_state : '',
                     rebuffering: chunkStats.rebuffering === true,
                     updatedAt: Date.now()
                 };
                 const prior = vdoState.chunkStatsByUser[userKey] || {};
                 changed = changed
                     || Math.round(prior.targetMs || -1) !== Math.round(nextStats.targetMs || -1)
+                    || Math.round(prior.deltaMs || -1) !== Math.round(nextStats.deltaMs || -1)
                     || Math.round(prior.levelMs || -1) !== Math.round(nextStats.levelMs || -1)
+                    || prior.scheduler !== nextStats.scheduler
+                    || prior.audioContextState !== nextStats.audioContextState
                     || prior.rebuffering !== nextStats.rebuffering;
                 vdoState.chunkStatsByUser[userKey] = nextStats;
             }
@@ -1144,15 +1194,22 @@
                 const chunkStats = vdoState.chunkStatsByUser[userKey] || {};
                 const chunkText = (typeof chunkStats.updatedAt === 'number' && (Date.now() - chunkStats.updatedAt) < 8000)
                     ? (' | chunk target ' + formatMaybeMs(chunkStats.targetMs)
+                        + ' delta ' + formatMaybeMs(chunkStats.deltaMs)
                         + ' level ' + formatMaybeMs(chunkStats.levelMs)
+                        + (chunkStats.scheduler ? (' scheduler ' + chunkStats.scheduler) : '')
+                        + (chunkStats.audioContextState ? (' ctx ' + chunkStats.audioContextState) : '')
                         + (chunkStats.rebuffering ? ' rebuffering' : ''))
+                    : '';
+                const mappingSource = vdoState.mappingSourceByUser[userKey] || 'unmapped';
+                const mappingDiagnostic = vdoState.mappingDiagnosticsByUser[userKey]
+                    ? (' | ' + vdoState.mappingDiagnosticsByUser[userKey])
                     : '';
                 const streamId = vdoState.streamIdByUser[userKey];
                 const chunkEvent = streamId ? vdoState.chunkEventsByStreamId[streamId] : null;
                 const chunkEventText = (chunkEvent && (Date.now() - chunkEvent.updatedAt) < 8000)
                     ? (' | last chunk ' + chunkEvent.direction + ' ' + chunkEvent.type + ' ts ' + formatMaybeMs(chunkEvent.ts))
                     : '';
-                const detailText = userKey + ': ' + diagnostics.text + vdoText + chunkText + chunkEventText;
+                const detailText = userKey + ': ' + diagnostics.text + vdoText + chunkText + ' | map ' + mappingSource + mappingDiagnostic + chunkEventText;
                 light.title = detailText + '\nClick to copy';
                 light.setAttribute('aria-label', detailText);
                 light.addEventListener('click', function () {
@@ -1198,6 +1255,8 @@
                 delete vdoState.latencyTargetMsByUser[userKey];
                 delete vdoState.latencyUpdatedAtByUser[userKey];
                 delete vdoState.chunkStatsByUser[userKey];
+                delete vdoState.mappingSourceByUser[userKey];
+                delete vdoState.mappingDiagnosticsByUser[userKey];
                 changed = true;
             }
             if (changed) {
@@ -1249,6 +1308,8 @@
                 delete vdoState.latencyTargetMsByUser[userKey];
                 delete vdoState.latencyUpdatedAtByUser[userKey];
                 delete vdoState.chunkStatsByUser[userKey];
+                delete vdoState.mappingSourceByUser[userKey];
+                delete vdoState.mappingDiagnosticsByUser[userKey];
                 changed = true;
             }
 
@@ -1262,13 +1323,16 @@
                 return false;
             }
             const revision = String(data.revision ?? data.videoClockMs ?? '');
+            if (!Array.isArray(data.users) || !data.users.length) {
+                return false;
+            }
             if (revision && vdoState.lastRosterRevision === revision) {
                 return false;
             }
             if (revision) {
                 vdoState.lastRosterRevision = revision;
             }
-            const users = Array.isArray(data.users) ? data.users : [];
+            const users = data.users;
             pruneUsersMissingFromPayload(users);
             return true;
         }
@@ -1326,18 +1390,10 @@
 
         function processIntervalPayload(payload) {
             const items = Array.isArray(payload) ? payload : [payload];
-            const activePayloadUsers = [];
             for (let i = 0; i < items.length; i++) {
                 const item = items[i] || {};
                 handleIntervalMessage(item);
-                if (item.type === 'remoteTimecode' || item.type === 'videoTimecode') {
-                    const userKey = normalizeUserId(item.userKey || item.userId || '');
-                    if (userKey) {
-                        activePayloadUsers.push(userKey);
-                    }
-                }
             }
-            pruneUsersMissingFromPayload(activePayloadUsers);
             pruneInactiveUsers();
             applyPeerBuffers(false);
         }
@@ -1524,18 +1580,28 @@
         function buildIframeUrl() {
             const iframeParams = new URLSearchParams();
             iframeParams.set('room', appState.room);
-            iframeParams.set('label', appState.label);
+            iframeParams.set('label', normalizeUserId(appState.vdoSyncUserKey || appState.label) || appState.label);
+            applyVdoCodecParams(iframeParams);
+            applyVdoQualityParams(iframeParams);
+            applyCameraFxParams(iframeParams);
             iframeParams.set('chunked', String(Math.max(60, appState.chunkedMs || 120)));
+            iframeParams.set('chunkbitrate', String(Math.max(60, appState.chunkedMs || 900)));
+            iframeParams.set('bitrate', String(Math.max(60, appState.chunkedMs || 900)));
+            iframeParams.set('maxvideobitrate', String(Math.max(60, appState.chunkedMs || 900)));
             iframeParams.set('chunkbufferadaptive', '0');
+            iframeParams.set('chunkbufferfloor', '0');
             iframeParams.set('chunkbufferceil', '180000');
+            iframeParams.set('chunkedbuffer', String(queryInteger(['chunkedbuffer', 'sendingbuffer'], 1500, 100, 60000)));
+            iframeParams.set('chunkadapt', query.get('chunkadapt') || 'bitrate');
+            iframeParams.set('chunkadaptfloor', String(queryInteger(['chunkadaptfloor'], 300, 0, 10000)));
+            iframeParams.set('chunkadaptceil', String(queryInteger(['chunkadaptceil'], Math.max(60, appState.chunkedMs || 900), 0, 100000)));
+            iframeParams.set('chunkadaptthreshold', String(queryInteger(['chunkadaptthreshold'], 500, 0, 10000)));
+            iframeParams.set('chunkadaptinterval', String(queryInteger(['chunkadaptinterval'], 1200, 100, 60000)));
             iframeParams.set('noaudio', '1');
             iframeParams.set('buffer2', '0');
             // Keep the initial room join buffer minimal; the sync layer applies the
             // measured delay after load, and sending both can double the result.
             iframeParams.set('buffer', String(minimumBufferMs));
-            applyVdoCodecParams(iframeParams);
-            applyVdoQualityParams(iframeParams);
-            applyCameraFxParams(iframeParams);
             return 'https://vdo.ninja/?' + iframeParams.toString();
         }
 
