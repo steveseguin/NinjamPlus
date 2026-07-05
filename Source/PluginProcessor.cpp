@@ -8365,6 +8365,15 @@ void NinjamVst3AudioProcessor::launchVideoSession()
     {
         const int helperPort = advancedVideoHelperPort.load();
         juce::URL helperUrl("http://127.0.0.1:" + juce::String(helperPort) + "/buffer-room");
+        // VDO sync mode is video-only. NINJam remains the audio clock, while
+        // the helper sends live per-peer VDO buffer updates. Keep the URL
+        // bitrate knobs (chunked/chunkbitrate/bitrate/maxvideobitrate) in kbps;
+        // do not derive them from launchBufferMs or BPI/BPM delay. That earlier
+        // unit mix-up made WebCodecs encode at 60-120 kbps. Tweak video quality
+        // with videoBitrateKbps, fps, quality, or the helper's camera presets.
+        // Tweak loss recovery with chunknack/chunkchunksize/chunkcache, and
+        // cellular/backpressure behavior with chunkedbuffer/chunkadapt*, without
+        // changing the NINJam-owned receiver delay contract.
         helperUrl = helperUrl.withParameter("room", room)
                              .withParameter("label", label)
                              .withParameter("vdoSyncUserKey", syncUserKey)

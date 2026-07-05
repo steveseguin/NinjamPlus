@@ -1584,6 +1584,30 @@
             applyVdoCodecParams(iframeParams);
             applyVdoQualityParams(iframeParams);
             applyCameraFxParams(iframeParams);
+            /*
+             * VDO.Ninja sync-mode parameter contract:
+             *
+             * - chunked/chunkbitrate/bitrate/maxvideobitrate are video bitrate
+             *   controls in kbps. They are not NINJam interval or playout-buffer
+             *   durations. A previous bug sent low buffer-derived values here,
+             *   which made WebCodecs encode at 60-120 kbps and stay blurry.
+             * - buffer is only the initial VDO viewer target. NINJam owns the
+             *   actual per-peer delay and sends live setBufferDelay updates once
+             *   measured route/user data arrives.
+             * - chunkbufferadaptive=0 keeps VDO from moving the receiver buffer
+             *   behind NINJam's back. If experimenting without NINJam sync, this
+             *   can be enabled with chunkbufferfloor/chunkbufferceil.
+             * - chunkindex=1 and chunknack=1 opt into indexed reliability framing
+             *   so skipped/missing chunks are observable and recoverable.
+             * - chunkcache is a resend cache window, not the playout delay. Keep
+             *   it bounded; NACKs are useful only before the receiver gives up on
+             *   a frame, even when the musical/video delay is much longer.
+             * - chunkedbuffer is the sender pacing/adaptation window. Raising it
+             *   can tolerate bursty SCTP delivery but also delays down-adaptation.
+             * - chunkadapt=bitrate is conservative for music sessions. hybrid or
+             *   framerate may recover harder under cellular congestion, but can
+             *   make motion less even for all viewers because the encoder is shared.
+             */
             iframeParams.set('chunked', String(Math.max(60, appState.chunkedMs || 900)));
             iframeParams.set('chunkbitrate', String(Math.max(60, appState.chunkedMs || 900)));
             iframeParams.set('bitrate', String(Math.max(60, appState.chunkedMs || 900)));
