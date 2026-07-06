@@ -354,7 +354,7 @@
         }
 
         function initialVdoCodec() {
-            return normalizeVdoCodec(query.get('cameraCodec') || query.get('vdoCodec') || query.get('codec') || query.get('videocodec') || 'default');
+            return normalizeVdoCodec(query.get('cameraCodec') || query.get('vdoCodec') || query.get('chunkcodec') || query.get('chunkvideocodec') || query.get('webcodecscodec') || query.get('codec') || query.get('videocodec') || 'default');
         }
 
         function initialCameraFx() {
@@ -391,6 +391,10 @@
             params.delete('vb');
             params.delete('cameraCodec');
             params.delete('vdoCodec');
+            params.delete('chunkcodec');
+            params.delete('chunkcodecs');
+            params.delete('chunkvideocodec');
+            params.delete('webcodecscodec');
             params.delete('codec');
             params.delete('codecs');
             params.delete('videocodec');

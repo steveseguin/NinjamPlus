@@ -186,7 +186,7 @@
         }
 
         function initialVdoCodec() {
-            return normalizeVdoCodec(query.get('cameraCodec') || query.get('vdoCodec') || query.get('codec') || query.get('videocodec') || 'default');
+            return normalizeVdoCodec(query.get('cameraCodec') || query.get('vdoCodec') || query.get('chunkcodec') || query.get('chunkvideocodec') || query.get('webcodecscodec') || query.get('codec') || query.get('videocodec') || 'default');
         }
 
         function initialCameraFx() {
@@ -1452,7 +1452,9 @@
 
         function applyVdoCodecParams(params) {
             if (appState.cameraCodec !== 'default') {
+                // codec controls RTP/fallback paths; chunkcodec controls WebCodecs/chunked video.
                 params.set('codec', appState.cameraCodec);
+                params.set('chunkcodec', appState.cameraCodec);
             }
         }
 
@@ -1490,6 +1492,36 @@
                     params.set('imagelist', encodeURIComponent(JSON.stringify([appState.cameraBgImage])));
                 }
             }
+        }
+
+        function applyVdoTransportOverrideParams(params) {
+            const names = [
+                'relay',
+                'private',
+                'privacy',
+                'tcp',
+                'speedtest',
+                'turn',
+                'stun',
+                'addstun',
+                'apiserver',
+                'wss',
+                'wss2'
+            ];
+            for (let i = 0; i < names.length; i++) {
+                const name = names[i];
+                if (query.has(name)) {
+                    params.set(name, query.get(name) || '');
+                }
+            }
+        }
+
+        function vdoIframeBaseUrl() {
+            const candidate = String(query.get('vdoBase') || query.get('vdoUrl') || '').trim();
+            if (/^https?:\/\//i.test(candidate)) {
+                return candidate.replace(/[?#].*$/, '').replace(/\/?$/, '/');
+            }
+            return 'https://vdo.ninja/';
         }
 
         function postEvalToVdo(source) {
@@ -1591,6 +1623,9 @@
              *   controls in kbps. They are not NINJam interval or playout-buffer
              *   durations. A previous bug sent low buffer-derived values here,
              *   which made WebCodecs encode at 60-120 kbps and stay blurry.
+             * - chunkcodec is the WebCodecs codec preference. codec is still
+             *   sent too for regular VDO/RTP fallback paths, but chunked mode
+             *   does not use codec by itself.
              * - buffer is only the initial VDO viewer target. NINJam owns the
              *   actual per-peer delay and sends live setBufferDelay updates once
              *   measured route/user data arrives.
@@ -1607,6 +1642,14 @@
              * - chunkadapt=bitrate is conservative for music sessions. hybrid or
              *   framerate may recover harder under cellular congestion, but can
              *   make motion less even for all viewers because the encoder is shared.
+             * - relay/tcp/speedtest/turn/stun/wss2 are optional test/deployment
+             *   pass-throughs. For far TURN/TCP testing, prefer relay=<region>&tcp.
+             *   speedtest=<region>&tcp can filter out all TURN entries when the
+             *   speedtest endpoint only advertises UDP for that region.
+             * - wss/wss2 select VDO's signaling endpoint only. Do not use the VDO
+             *   handshake websocket as an app-level command/control channel.
+             * - vdoBase=https://vdo.ninja/alpha/ can point testing at alpha builds.
+             *   Production defaults to https://vdo.ninja/ when this is omitted.
              */
             iframeParams.set('chunked', String(Math.max(60, appState.chunkedMs || 900)));
             iframeParams.set('chunkbitrate', String(Math.max(60, appState.chunkedMs || 900)));
@@ -1632,7 +1675,8 @@
             // Keep the initial room join buffer minimal; the sync layer applies the
             // measured delay after load, and sending both can double the result.
             iframeParams.set('buffer', String(minimumBufferMs));
-            return 'https://vdo.ninja/?' + iframeParams.toString();
+            applyVdoTransportOverrideParams(iframeParams);
+            return vdoIframeBaseUrl() + '?' + iframeParams.toString();
         }
 
         function handleVdoMessage(data) {
